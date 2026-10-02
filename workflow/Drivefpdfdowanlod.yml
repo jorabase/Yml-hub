@@ -1,0 +1,307 @@
+name: 🚀 Google Drive File Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      drive_urls:
+        description: "Google Drive URL/ID (one or multiple, separated by new lines)"
+        required: true
+        type: string
+
+      output_name:
+        description: "Output file/folder name (optional)"
+        required: false
+        default: "downloads"
+        type: string
+
+      make_zip:
+        description: "Create ZIP archive?"
+        required: false
+        default: true
+        type: boolean
+
+      upload_artifact:
+        description: "Upload files as GitHub Artifact?"
+        required: false
+        default: true
+        type: boolean
+
+      retention_days:
+        description: "Artifact retention days"
+        required: false
+        default: "7"
+        type: string
+
+jobs:
+  download:
+    name: 📥 Download Google Drive Files
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+
+      # --------------------------------------------------
+      # 1. System information
+      # --------------------------------------------------
+      - name: 🖥️ System Information
+        run: |
+          echo "======================================"
+          echo " GitHub Drive Downloader"
+          echo "======================================"
+          echo "OS: $(lsb_release -ds)"
+          echo "CPU: $(nproc)"
+          echo "RAM:"
+          free -h
+          echo "Disk:"
+          df -h
+          echo "======================================"
+
+      # --------------------------------------------------
+      # 2. Install dependencies
+      # --------------------------------------------------
+      - name: 📦 Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 \
+            python3-pip \
+            p7zip-full \
+            unzip \
+            zip \
+            curl \
+            wget \
+            file
+
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --upgrade gdown
+
+      # --------------------------------------------------
+      # 3. Prepare folders
+      # --------------------------------------------------
+      - name: 📁 Prepare Workspace
+        run: |
+          mkdir -p downloads
+          mkdir -p logs
+
+      # --------------------------------------------------
+      # 4. Download Google Drive files
+      # --------------------------------------------------
+      - name: 📥 Download Files
+        env:
+          DRIVE_URLS: ${{ inputs.drive_urls }}
+          OUTPUT_NAME: ${{ inputs.output_name }}
+        run: |
+          set -e
+
+          echo "$DRIVE_URLS" | tr ',' '\n' | while IFS= read -r URL
+          do
+            URL="$(echo "$URL" | xargs)"
+
+            if [ -z "$URL" ]; then
+              continue
+            fi
+
+            echo ""
+            echo "======================================"
+            echo "Downloading:"
+            echo "$URL"
+            echo "======================================"
+
+            # Extract Google Drive file ID
+            FILE_ID=""
+
+            if echo "$URL" | grep -q "drive.google.com"; then
+              FILE_ID=$(echo "$URL" | sed -nE 's#.*\/d\/([^\/?]+).*#\1#p')
+
+              if [ -z "$FILE_ID" ]; then
+                FILE_ID=$(echo "$URL" | sed -nE 's#.*[?&]id=([^&]+).*#\1#p')
+              fi
+            else
+              FILE_ID="$URL"
+            fi
+
+            if [ -z "$FILE_ID" ]; then
+              echo "❌ Could not detect Google Drive file ID"
+              continue
+            fi
+
+            echo "File ID: $FILE_ID"
+
+            python3 -m gdown \
+              "https://drive.google.com/uc?id=$FILE_ID" \
+              --fuzzy \
+              -O "downloads/${FILE_ID}"
+
+            echo "✅ Download complete"
+          done
+
+      # --------------------------------------------------
+      # 5. Detect file types
+      # --------------------------------------------------
+      - name: 🔍 Analyze Downloaded Files
+        run: |
+          echo "======================================"
+          echo "Downloaded Files"
+          echo "======================================"
+
+          find downloads -type f -exec ls -lh {} \;
+
+          echo ""
+          echo "File types:"
+          find downloads -type f -exec file {} \;
+
+      # --------------------------------------------------
+      # 6. Rename files using detected extensions
+      # --------------------------------------------------
+      - name: 🏷️ Fix File Extensions
+        run: |
+          for FILE in downloads/*; do
+
+            [ -f "$FILE" ] || continue
+
+            TYPE=$(file -b "$FILE")
+
+            if echo "$TYPE" | grep -qi "PDF"; then
+              mv "$FILE" "${FILE}.pdf"
+
+            elif echo "$TYPE" | grep -qi "Zip archive"; then
+              mv "$FILE" "${FILE}.zip"
+
+            elif echo "$TYPE" | grep -qi "Microsoft Excel"; then
+              mv "$FILE" "${FILE}.xlsx"
+
+            elif echo "$TYPE" | grep -qi "Microsoft Word"; then
+              mv "$FILE" "${FILE}.docx"
+
+            elif echo "$TYPE" | grep -qi "PNG"; then
+              mv "$FILE" "${FILE}.png"
+
+            elif echo "$TYPE" | grep -qi "JPEG"; then
+              mv "$FILE" "${FILE}.jpg"
+
+            fi
+
+          done
+
+      # --------------------------------------------------
+      # 7. Create ZIP
+      # --------------------------------------------------
+      - name: 🗜️ Create ZIP Archive
+        if: ${{ inputs.make_zip }}
+        env:
+          OUTPUT_NAME: ${{ inputs.output_name }}
+        run: |
+          mkdir -p output
+
+          ZIP_NAME="${OUTPUT_NAME}.zip"
+
+          cd downloads
+          zip -r "../output/$ZIP_NAME" .
+
+          echo "ZIP created:"
+          ls -lh "../output/$ZIP_NAME"
+
+      # --------------------------------------------------
+      # 8. Create checksum
+      # --------------------------------------------------
+      - name: 🔐 Generate SHA256 Checksums
+        run: |
+          mkdir -p output
+
+          if [ -d downloads ]; then
+            find downloads -type f -print0 | \
+              xargs -0 sha256sum > output/SHA256SUMS.txt
+          fi
+
+          if [ -d output ]; then
+            find output -type f -exec sha256sum {} \; \
+              >> output/SHA256SUMS.txt
+          fi
+
+          echo ""
+          cat output/SHA256SUMS.txt
+
+      # --------------------------------------------------
+      # 9. Generate download information
+      # --------------------------------------------------
+      - name: 📝 Generate Report
+        env:
+          DRIVE_URLS: ${{ inputs.drive_urls }}
+        run: |
+          {
+            echo "# 📦 Google Drive Download Report"
+            echo
+            echo "## Downloaded Files"
+            echo
+            find downloads -type f -printf '%f\n' | sed 's/^/- /'
+            echo
+            echo "## File Information"
+            echo
+            find downloads -type f -exec ls -lh {} \;
+            echo
+            echo "## SHA256"
+            echo
+            cat output/SHA256SUMS.txt 2>/dev/null || true
+          } > output/REPORT.md
+
+          cat output/REPORT.md
+
+      # --------------------------------------------------
+      # 10. Upload individual files
+      # --------------------------------------------------
+      - name: 📤 Upload Downloaded Files
+        if: ${{ inputs.upload_artifact }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-drive-files
+          path: downloads/
+          retention-days: ${{ inputs.retention_days }}
+          compression-level: 0
+
+      # --------------------------------------------------
+      # 11. Upload ZIP
+      # --------------------------------------------------
+      - name: 📤 Upload ZIP
+        if: ${{ inputs.upload_artifact && inputs.make_zip }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-drive-zip
+          path: output/*.zip
+          retention-days: ${{ inputs.retention_days }}
+          compression-level: 0
+
+      # --------------------------------------------------
+      # 12. Upload report
+      # --------------------------------------------------
+      - name: 📊 Upload Report
+        if: ${{ inputs.upload_artifact }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: download-report
+          path: |
+            output/REPORT.md
+            output/SHA256SUMS.txt
+          retention-days: ${{ inputs.retention_days }}
+
+      # --------------------------------------------------
+      # 13. Final summary
+      # --------------------------------------------------
+      - name: ✅ Final Summary
+        run: |
+          echo "======================================"
+          echo "        DOWNLOAD COMPLETE"
+          echo "======================================"
+          echo ""
+          echo "Files:"
+          find downloads -type f -exec ls -lh {} \;
+          echo ""
+          echo "Artifacts:"
+          echo "  📁 google-drive-files"
+          echo "  🗜️ google-drive-zip"
+          echo "  📊 download-report"
+          echo ""
+          echo "You can download them from the"
+          echo "GitHub Actions run page."
+          echo "======================================"
